@@ -191,7 +191,6 @@ def extract_svo_with_features(sentence, similarity_threshold=0.7):
                                 "active_voice": active_voice,
                                 "aux_verb_present": aux_present
                             })
-            
             # Passive voice processing.
             elif token.dep_ == "nsubjpass":
                 agent_found = False
@@ -272,14 +271,18 @@ def build_svo_features(doc0, prim_key0, similarity_threshold=0.7):
     Tokenize the document into sentences (using nltk.sent_tokenize) and extract SVO features
     from each sentence. For each sentence that yields multiple SVO tuples, the same sentence
     index and original sentence are repeated for each clause.
-    
+
     Also computes sentiment for each clause using VADER and maps the agency_level to final_class.
-    
+
     Returns a pandas DataFrame with columns:
       'prim_key', 'sent_ind', 'sent_orig', 'clause_text', 'subj', 'verb', 'obj',
       'svo_string', 'agency_level', 'final_class', 'active_voice', 'aux_verb_present',
       'sentiment_compound'
     """
+    # If the input is a spaCy Doc, convert it to string.
+    if not isinstance(doc0, str):
+        doc0 = doc0.text
+
     sent_list = nltk.sent_tokenize(doc0)
     svo_features_list = []
     
@@ -291,9 +294,9 @@ def build_svo_features(doc0, prim_key0, similarity_threshold=0.7):
             res['prim_key'] = prim_key0
             res['sent_ind'] = sent_inds[j]
             res['sent_orig'] = sent_orig[j]
-            # Map internal agency_level to final class (A, B, or C)
+            # Map internal agency_level to final class: A1 -> A, A2 -> B, external -> C.
             res['final_class'] = map_agency_to_final(res['agency_level'])
-            # Compute sentiment (VADER compound score) on the clause text
+            # Compute sentiment (VADER compound score) on the clause text.
             sentiment = sia.polarity_scores(res['clause_text'])
             res['sentiment_compound'] = sentiment.get("compound", 0.0)
             svo_features_list.append(res)
