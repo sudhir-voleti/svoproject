@@ -1,0 +1,310 @@
+#!/usr/bin/env python
+"""
+svo_sentiment_extraction.py
+
+A self-contained program for rule‑based SVO extraction, agency classification,
+and sentiment analysis at the clause level. The program uses spaCy for parsing,
+NLTK for sentence tokenization and VADER sentiment analysis, and returns a pandas
+DataFrame of extracted clauses. The internal agency levels are mapped as:
+    A1 -> A, A2 -> B, external -> C.
+"""
+
+import nltk
+import spacy
+import pandas as pd
+from nltk.sentiment import SentimentIntensityAnalyzer
+
+# Download required NLTK resources
+nltk.download("punkt")
+nltk.download("vader_lexicon")
+
+# Load spaCy model
+nlp = spacy.load("en_core_web_md")
+
+# Initialize VADER sentiment analyzer
+sia = SentimentIntensityAnalyzer()
+
+# --- Updated Keyword Lists ---
+FIRST_PERSON_PRONOUNS = {"i", "me", "we", "us", "myself", "ourselves"}
+
+FIRM_ASSET_KEYWORDS = {
+    "backlog", "equipment", "results", "assets", "inventory", 
+    "position", "brand", "revenues", "portfolio", "sales", "earnings", 
+    "dividends", "growth", "profit", "performance"
+}
+
+SELF_REFERENCE_LIST = [
+    "our company", "the firm", "the board", "management", "my team",
+    "our management", "our leadership", "our business", "our revenue", 
+    "our growth"
+]
+
+# --- Helper Functions ---
+def is_definitely_firm_pronoun(span):
+    """Return True if the span is exactly a first-person pronoun."""
+    return len(span) == 1 and span[0].lower_ in FIRST_PERSON_PRONOUNS
+
+def is_firm_inanimate(span):
+    """
+    Check if the span appears to be a possessive referring to a firm asset,
+    e.g., "our sales" or "our earnings".
+    """
+    txt = span.text.lower()
+    if txt.startswith("our "):
+        for kw in FIRM_ASSET_KEYWORDS:
+            if kw in txt:
+                return True
+    return False
+
+def fallback_is_firm_semantic(span, threshold):
+    """
+    Fallback similarity check against SELF_REFERENCE_LIST.
+    Returns True if the best similarity score is at or above the given threshold.
+    """
+    if not span.vector_norm:
+        return False
+    span_doc = nlp(span.text.lower())
+    best_score = 0.0
+    for ref in SELF_REFERENCE_LIST:
+        ref_doc = nlp(ref)
+        score = span_doc.similarity(ref_doc)
+        if score > best_score:
+            best_score = score
+    return best_score >= threshold
+
+def label_agency_level(span, similarity_threshold):
+    """
+    Label the agency level based on the subject span:
+      - "A1": direct high agency (explicit first-person pronoun, e.g., "we")
+      - "A2": indirect self (e.g., possessive like "our sales")
+      - "external": no self reference
+    """
+    text = span.text.lower().strip()
+    if is_definitely_firm_pronoun(span):
+        return "A1"
+    if text.startswith("our "):
+        return "A2"
+    if fallback_is_firm_semantic(span, similarity_threshold):
+        return "A2"
+    return "external"
+
+def map_agency_to_final(agency_level):
+    """
+    Map our internal agency labels to your final classes:
+      A1 -> A, A2 -> B, external -> C.
+    """
+    if agency_level == "A1":
+        return "A"
+    elif agency_level == "A2":
+        return "B"
+    else:
+        return "C"
+
+def check_aux_verb_present(verb_token):
+    """Return 1 if the verb token has an auxiliary child; else 0."""
+    for child in verb_token.children:
+        if child.dep_ in ("aux", "auxpass"):
+            return 1
+    return 0
+
+def get_simple_verb(verb_token):
+    """Return the main verb's text (ignoring auxiliaries and adverbs)."""
+    return verb_token.text
+
+def subtree_span(token):
+    """Return a spaCy span covering the entire subtree of the given token."""
+    subs = list(token.subtree)
+    start = subs[0].i
+    end = subs[-1].i
+    return token.doc[start:end+1]
+
+# --- SVO Extraction with Agency and Passive Voice Handling ---
+def extract_svo_with_features(sentence, similarity_threshold=0.7):
+    """
+    Extract SVO tuples from a sentence (by clause).
+
+    For active voice (nsubj):
+      - Use the subject as-is.
+    For passive voice (nsubjpass):
+      - If an explicit agent (e.g., "by us") is found, extract that as S and the original subject as O.
+      - Otherwise, if no direct object is found and the subject's agency is not "A1",
+        rewrite the tuple as: {something_external, <verb>, <original subject>}.
+
+    Returns a list of dictionaries, each containing:
+      'clause_text', 'subj', 'verb', 'obj', 'svo_string',
+      'agency_level', 'active_voice', 'aux_verb_present'
+    """
+    doc = nlp(sentence)
+    results = []
+    
+    for token in doc:
+        if token.dep_ in ("nsubj", "nsubjpass") and token.head.pos_ == "VERB":
+            verb_token = token.head
+            aux_present = check_aux_verb_present(verb_token)
+            verb_text = get_simple_verb(verb_token)
+            
+            # Active voice processing.
+            if token.dep_ == "nsubj":
+                subj_span = subtree_span(token)
+                agency_level = label_agency_level(subj_span, similarity_threshold)
+                active_voice = True
+                object_spans = []
+                for child in verb_token.children:
+                    if child.dep_ in ("dobj", "attr", "oprd"):
+                        object_spans.append(subtree_span(child))
+                if not object_spans and agency_level != "A1":
+                    new_subj = "something_external"
+                    svo_str = f"{new_subj} {verb_text} {subj_span.text}"
+                    results.append({
+                        "clause_text": subj_span.sent.text,
+                        "subj": new_subj,
+                        "verb": verb_text,
+                        "obj": subj_span.text,
+                        "svo_string": svo_str,
+                        "agency_level": agency_level,
+                        "active_voice": active_voice,
+                        "aux_verb_present": aux_present
+                    })
+                else:
+                    if not object_spans:
+                        svo_str = f"{subj_span.text} {verb_text}"
+                        results.append({
+                            "clause_text": subj_span.sent.text,
+                            "subj": subj_span.text,
+                            "verb": verb_text,
+                            "obj": None,
+                            "svo_string": svo_str,
+                            "agency_level": agency_level,
+                            "active_voice": active_voice,
+                            "aux_verb_present": aux_present
+                        })
+                    else:
+                        for obj_span in object_spans:
+                            svo_str = f"{subj_span.text} {verb_text} {obj_span.text}"
+                            results.append({
+                                "clause_text": subj_span.sent.text,
+                                "subj": subj_span.text,
+                                "verb": verb_text,
+                                "obj": obj_span.text,
+                                "svo_string": svo_str,
+                                "agency_level": agency_level,
+                                "active_voice": active_voice,
+                                "aux_verb_present": aux_present
+                            })
+            
+            # Passive voice processing.
+            elif token.dep_ == "nsubjpass":
+                agent_found = False
+                for child in verb_token.children:
+                    if child.dep_ == "agent":
+                        for sub_child in child.children:
+                            if sub_child.dep_ in ("pobj",):
+                                agent_span = subtree_span(sub_child)
+                                agency_level = label_agency_level(agent_span, similarity_threshold)
+                                active_voice = False
+                                orig_subj_span = subtree_span(token)
+                                svo_str = f"{agent_span.text} {verb_text} {orig_subj_span.text}"
+                                results.append({
+                                    "clause_text": orig_subj_span.sent.text,
+                                    "subj": agent_span.text,
+                                    "verb": verb_text,
+                                    "obj": orig_subj_span.text,
+                                    "svo_string": svo_str,
+                                    "agency_level": agency_level,
+                                    "active_voice": active_voice,
+                                    "aux_verb_present": aux_present
+                                })
+                                agent_found = True
+                        if agent_found:
+                            break
+                if not agent_found:
+                    subj_span = subtree_span(token)
+                    agency_level = label_agency_level(subj_span, similarity_threshold)
+                    active_voice = False
+                    object_spans = []
+                    for child in verb_token.children:
+                        if child.dep_ in ("dobj", "attr", "oprd"):
+                            object_spans.append(subtree_span(child))
+                    if not object_spans and agency_level != "A1":
+                        new_subj = "something_external"
+                        svo_str = f"{new_subj} {verb_text} {subj_span.text}"
+                        results.append({
+                            "clause_text": subj_span.sent.text,
+                            "subj": new_subj,
+                            "verb": verb_text,
+                            "obj": subj_span.text,
+                            "svo_string": svo_str,
+                            "agency_level": agency_level,
+                            "active_voice": active_voice,
+                            "aux_verb_present": aux_present
+                        })
+                    else:
+                        if not object_spans:
+                            svo_str = f"{subj_span.text} {verb_text}"
+                            results.append({
+                                "clause_text": subj_span.sent.text,
+                                "subj": subj_span.text,
+                                "verb": verb_text,
+                                "obj": None,
+                                "svo_string": svo_str,
+                                "agency_level": agency_level,
+                                "active_voice": active_voice,
+                                "aux_verb_present": aux_present
+                            })
+                        else:
+                            for obj_span in object_spans:
+                                svo_str = f"{subj_span.text} {verb_text} {obj_span.text}"
+                                results.append({
+                                    "clause_text": subj_span.sent.text,
+                                    "subj": subj_span.text,
+                                    "verb": verb_text,
+                                    "obj": obj_span.text,
+                                    "svo_string": svo_str,
+                                    "agency_level": agency_level,
+                                    "active_voice": active_voice,
+                                    "aux_verb_present": aux_present
+                                })
+    return results
+
+# --- Build SVO Features for a Document ---
+def build_svo_features(doc0, prim_key0, similarity_threshold=0.7):
+    """
+    Tokenize the document into sentences (using nltk.sent_tokenize) and extract SVO features
+    from each sentence. For each sentence that yields multiple SVO tuples, the same sentence
+    index and original sentence are repeated for each clause.
+    
+    Also computes sentiment for each clause using VADER and maps the agency_level to final_class.
+    
+    Returns a pandas DataFrame with columns:
+      'prim_key', 'sent_ind', 'sent_orig', 'clause_text', 'subj', 'verb', 'obj',
+      'svo_string', 'agency_level', 'final_class', 'active_voice', 'aux_verb_present',
+      'sentiment_compound'
+    """
+    sent_list = nltk.sent_tokenize(doc0)
+    svo_features_list = []
+    
+    for i, sent in enumerate(sent_list):
+        results = extract_svo_with_features(sent, similarity_threshold)
+        sent_inds = [i] * len(results)
+        sent_orig = [sent] * len(results)
+        for j, res in enumerate(results):
+            res['prim_key'] = prim_key0
+            res['sent_ind'] = sent_inds[j]
+            res['sent_orig'] = sent_orig[j]
+            # Map internal agency_level to final class (A, B, or C)
+            res['final_class'] = map_agency_to_final(res['agency_level'])
+            # Compute sentiment (VADER compound score) on the clause text
+            sentiment = sia.polarity_scores(res['clause_text'])
+            res['sentiment_compound'] = sentiment.get("compound", 0.0)
+            svo_features_list.append(res)
+    
+    return pd.DataFrame(svo_features_list)
+
+## Test drive   
+# Combine the sentences into one document (or process as list)
+# doc0 = " ".join(sample_sentences)
+# prim_key0 = "SampleDoc_001"
+    
+# Build the SVO features DataFrame with sentiment and final class mapping
+# df_features = build_svo_features(doc0, prim_key0, similarity_threshold=0.7)
+# df_features
