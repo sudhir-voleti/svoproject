@@ -281,25 +281,35 @@ def build_svo_features(doc0, prim_key0, similarity_threshold=0.7):
     """
     # If the input is a spaCy Doc, convert it to string.
     if not isinstance(doc0, str):
-        doc0 = doc0.text
+        try:
+            doc0 = doc0.text
+        except Exception as e:
+            # If conversion fails (e.g. doc0 is nan), return an empty DataFrame.
+            return pd.DataFrame([])
 
+    # Tokenize the document into sentences.
     sent_list = nltk.sent_tokenize(doc0)
     svo_features_list = []
     
     for i, sent in enumerate(sent_list):
-        results = extract_svo_with_features(sent, similarity_threshold)
-        sent_inds = [i] * len(results)
-        sent_orig = [sent] * len(results)
-        for j, res in enumerate(results):
-            res['prim_key'] = prim_key0
-            res['sent_ind'] = sent_inds[j]
-            res['sent_orig'] = sent_orig[j]
-            # Map internal agency_level to final class: A1 -> A, A2 -> B, external -> C.
-            res['final_class'] = map_agency_to_final(res['agency_level'])
-            # Compute sentiment (VADER compound score) on the clause text.
-            sentiment = sia.polarity_scores(res['clause_text'])
-            res['sentiment_compound'] = sentiment.get("compound", 0.0)
-            svo_features_list.append(res)
+        try:
+            # Process each sentence. If the sentence is not a valid string (e.g. nan), this block will fail.
+            results = extract_svo_with_features(sent, similarity_threshold)
+            sent_inds = [i] * len(results)
+            sent_orig = [sent] * len(results)
+            for j, res in enumerate(results):
+                res['prim_key'] = prim_key0
+                res['sent_ind'] = sent_inds[j]
+                res['sent_orig'] = sent_orig[j]
+                # Map internal agency_level to final class.
+                res['final_class'] = map_agency_to_final(res['agency_level'])
+                # Compute sentiment (VADER compound score) on the clause text.
+                sentiment = sia.polarity_scores(res['clause_text'])
+                res['sentiment_compound'] = sentiment.get("compound", 0.0)
+                svo_features_list.append(res)
+        except Exception as e:
+            # Skip the problematic sentence (e.g. if sent is nan or any attribute is missing)
+            continue
     
     return pd.DataFrame(svo_features_list)
 
