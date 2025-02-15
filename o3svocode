@@ -311,3 +311,35 @@ def build_svo_features(doc0, prim_key0, similarity_threshold=0.7):
 # Build the SVO features DataFrame with sentiment and final class mapping
 # df_features = build_svo_features(doc0, prim_key0, similarity_threshold=0.7)
 # df_features
+
+import re, nltk, time
+import pandas as pd
+pd.options.mode.chained_assignment = None  # default='warn'
+
+def filter_doc(doc):
+    """
+    Tokenizes the document into sentences, removes any sentence that contains:
+      - The word "operator" (case-insensitive)
+      - Any variant of "forward-looking" (e.g., "forward looking", "forward- looking", etc.)
+    Returns the revised document as a single string.
+    """
+    # Tokenize into sentences
+    sentences = nltk.sent_tokenize(doc)
+    
+    # Define regex for variants of "forward-looking"
+    # This pattern matches "forward" followed by optional whitespace, optional dash, optional whitespace, "looking"
+    forward_pattern = re.compile(r"forward\s*-?\s*looking", re.IGNORECASE)
+    
+    # Define regex for the word "operator" (word boundary ensures whole word match)
+    operator_pattern = re.compile(r"\boperator\b", re.IGNORECASE)
+    
+    # Filter out sentences that match either pattern
+    filtered_sentences = []
+    for sent in sentences:
+        if operator_pattern.search(sent) or forward_pattern.search(sent):
+            continue  # Skip sentences containing any of the keywords
+        filtered_sentences.append(sent)
+    
+    # Re-join remaining sentences
+    revised_doc = " ".join(filtered_sentences)
+    return revised_doc
